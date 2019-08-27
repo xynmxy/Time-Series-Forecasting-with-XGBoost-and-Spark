@@ -2,7 +2,9 @@ package com.github.wumrwds
 
 
 import ml.dmlc.xgboost4j.scala.spark.XGBoostRegressor
+import org.apache.spark.ml.evaluation.RegressionEvaluator
 import org.apache.spark.ml.feature.VectorAssembler
+import org.apache.spark.ml.tuning.{CrossValidator, ParamGridBuilder}
 import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.types.DoubleType
 import org.apache.spark.sql.{Column, SparkSession}
@@ -27,7 +29,7 @@ object App {
         // init spark session
         val sparkSession = SparkSession
                 .builder()
-                .master("local[4]")
+                .master("local[2]")
                 .appName("Xgboost_Time_Series_Forecasting")
                 .getOrCreate()
 
@@ -46,27 +48,44 @@ object App {
         val vectorAssembler = new VectorAssembler().
                 setInputCols(Array("f1", "f2", "f3")).
                 setOutputCol("features")
-        val trainDf = vectorAssembler.transform(trainDoubleDf)
-        val testDf = vectorAssembler.transform(testDoubleDf)
+        val trainDf = vectorAssembler.transform(trainDoubleDf).repartition(2)
+        val testDf = vectorAssembler.transform(testDoubleDf).repartition(2)
 
         // set xgboost regressor
         val xgbRegressor = new XGBoostRegressor(
-            Map("eta" -> 0.1f,
-                "max_depth" -> 2,
-                "objective" -> "reg:squarederror",
-                "num_round" -> 100,
-                "nworkers" -> 4,
+            Map("objective" -> "reg:squarederror",
+                "nworkers" -> 1,
                 "use_external_memory" -> true
             )
         )
                 .setFeaturesCol("features")
                 .setLabelCol("y")
 
+        // set param grid
+        val paramGrid = new ParamGridBuilder()
+                .addGrid(xgbRegressor.maxDepth, List(6, 5))
+//                .addGrid(xgbRegressor.subsample, List(1.0, 0.8))
+//                .addGrid(xgbRegressor.colsampleBytree, List(1.0, 0.7))
+//                .addGrid(xgbRegressor.eta, List(0.3, 0.5))
+                .addGrid(xgbRegressor.numRound, List(200, 100))
+                .build()
+
+        // set evaluator
+        val regressionEvaluator = new RegressionEvaluator()
+                .setLabelCol("y")
+
+        // do cross validation
+        val cv = new CrossValidator()
+                .setEstimator(xgbRegressor)
+                .setEstimatorParamMaps(paramGrid)
+                .setEvaluator(regressionEvaluator)
+                .setNumFolds(3)
+
         // train
-        val model = xgbRegressor.fit(trainDf)
+        val cvModel = cv.fit(trainDf)
 
         // predict
-        val result = model.transform(testDf)
+        val result = cvModel.transform(testDf)
 
         // print result
         result.select(col("date"), col("prediction")).coalesce(1).show(100, false)
